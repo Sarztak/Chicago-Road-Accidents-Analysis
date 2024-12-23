@@ -1,4 +1,4 @@
-![Project Banner](Chicago-Road-Accidents-Analysis/assets/accident.png)
+![Project Banner](assets/accident.png)
 
 # Traffic Accident Severity Prediction from Chicago Road Accidents Data 2024
 
