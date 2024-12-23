@@ -1,0 +1,777 @@
+---
+title: "Chicago Road Accidents Analysis Modelling"
+author: "Sarthak Sunil Dhanke"
+date: "2024-11-28"
+output: html_document
+---
+
+```{r warning=FALSE, message=FALSE}
+# setting the directory to your current directory
+setwd('/path/to/your/directory/Chicago Road Accidents Analysis')
+
+# loading the libraries
+library(nnet)
+library(car)
+library(DescTools)
+library(caret)
+library(randomForest)
+library(tidyverse)
+library(skimr)
+library(showtext)
+library(ggthemes)
+library(patchwork)
+library(DMwR)
+library(xgboost)
+library(lightgbm)
+library(gtsummary)
+
+# setting up font library
+font_add_google("EB Garamond")
+windows()
+showtext_auto()
+```
+
+
+
+```{r}
+df <- readRDS("./data/Traffic Crashes 2024 Grouped.rds")
+
+
+# doing this is necessary because xgboost model do not run otherwise.
+df <- data.frame(
+  damage = df$damage,
+  posted_speed_limit = df$posted_speed_limit,
+  num_units = df$num_units,
+  most_severe_injury = df$most_severe_injury,
+  weather_condition = df$weather_condition,
+  lighting_condition = df$lighting_condition,
+  roadway_surface_cond = df$roadway_surface_cond,
+  road_defect = df$road_defect,
+  trafficway_type = df$trafficway_type,
+  prim_cause = df$prim_cause,
+  sec_cause = df$sec_cause,
+  crash_hour = df$crash_hour,
+  crash_day_of_week = df$crash_day_of_week,
+  crash_month = df$crash_month,
+  crash_type = df$crash_type
+)
+```
+
+
+```{r}
+# split the data into training and testing
+set.seed(1984)
+train_index <- sample(1:nrow(df), 0.8 * nrow(df))
+train_data <- df[train_index, ]
+test_data <- df[-train_index, ]
+```
+
+
+
+```{r}
+# do not run smote again as the data is saved
+# balanced_data <- SMOTE(damage ~ ., data = df, perc.over = 200, perc.under = 200)
+balanced_data <- readRDS("./data/Balanced Data.rds")
+```
+
+
+
+```{r}
+table(df$damage)
+```
+
+
+```{r}
+table(balanced_data$damage)
+```
+
+
+```{r fig.width=12, fig.height=9}
+# showing the class imbalance
+
+# Create tibble
+class_imbalance <- tibble(
+  stage = factor(c("Before", "Before", "After", "After"), levels = c("Before", "After")),
+  class = c("Low", "High", "Low", "High"),
+  count = c(28950, 72454, 61323, 81764)
+)
+
+# Calculate percentages for each stage
+class_imbalance <- class_imbalance %>%
+  group_by(stage) %>%
+  mutate(percent = count / sum(count) * 100)  # Calculate percentage
+
+# Plot with percentages on top of bars
+class_imbalance %>%
+  ggplot(aes(stage, count, fill = class)) +
+  geom_col(position = "dodge", width = 0.5) +
+  geom_text(
+    aes(label = paste0(round(percent, 1), "%")),  # Format percentages
+    position = position_dodge(width = 0.5),      # Align text with bars
+    vjust = -0.7, size = 7, family = "EB Garamond", fontface = "bold"                           # Adjust text position above bars
+  ) +
+  scale_fill_manual(name = "Damage", values = c("brown", "steelblue")) +
+  scale_y_continuous(labels = scales::label_number(scale = 1e-3, suffix = "K")) +
+  labs(
+    y = "Accident Count",
+    x = "",
+    title = "Class Imbalance Before and After SMOTE",
+    subtitle = "SMOTE significantly improves the distribution of underrepresented classes addressing imbalance in the dataset"
+  ) +
+  theme_hc() +  # Apply the custom theme
+  theme(
+    axis.text = element_text(size = 25, family = "EB Garamond", face = "bold"),
+    axis.title.y = element_text(size = 20, family = "EB Garamond", margin = ggplot2::margin(r = 20, l = 10)),
+    axis.title.x = element_text(size = 20, family = "EB Garamond"),
+    axis.text.x = element_text(color = "black"),
+    axis.text.y = element_text(color = "black", size = 21),
+    legend.position = "right",
+    plot.title = element_text(family = "EB Garamond", size = 23, face = "bold"),
+    plot.subtitle = element_text(family = "EB Garamond", size = 17, margin = ggplot2::margin(t = 5, b = 10)),
+    legend.text = element_text(size = 14, face = "bold"),
+    legend.title = element_text(size = 16, face = "bold")
+  )
+
+```
+
+```{r}
+# logistic regression model 
+
+glmod_full <- glm(factor(damage) ~ . + log(posted_speed_limit) - posted_speed_limit +
+                   weather_condition * lighting_condition + 
+                   roadway_surface_cond * posted_speed_limit + 
+                   crash_hour * crash_day_of_week + 
+                   prim_cause * num_units + 
+                   trafficway_type * posted_speed_limit, 
+                   family = binomial, 
+                   data = balanced_data
+              )
+summary(glmod_full)
+```
+
+
+
+```{r}
+# reducing model parametes using AIC and backward selection
+# glmod_stepwise <- step(glmod_full, direction = "backward", trace = TRUE)
+# saveRDS(glmod_stepwise, "logistic_regression_model.rds")
+glmod_stepwise <- readRDS("logistic_regression_model.rds")
+summary(glmod_stepwise)
+```
+
+
+```{r}
+# check effect of dropping : most of the variables are significant
+drop1(glmod_stepwise,test = "Chi")
+```
+
+
+```{r fig.height=9, fig.width=12}
+# Load necessary libraries
+library(pROC)
+library(ggplot2)
+
+# Predict probabilities
+predicted_probs <- predict(glmod_stepwise, type = "response")
+
+# Create the ROC curve object
+roc_curve <- roc(balanced_data$damage, predicted_probs, levels = c("High", "Low"))
+
+# Extract ROC curve data for ggplot
+roc_data <- data.frame(
+  TPR = roc_curve$sensitivities,  # True Positive Rate (Sensitivity)
+  FPR = 1 - roc_curve$specificities # False Positive Rate
+)
+
+# Calculate AUC
+auc_value <- auc(roc_curve)
+
+# Find the optimal threshold using Youden's J statistic
+optimal_coords <- coords(roc_curve, "best", ret = c("threshold", "sensitivity", "specificity", "youden"))
+optimal_threshold <- optimal_coords["threshold"]$threshold
+
+# Plot the ROC curve using ggplot2
+ggplot(roc_data, aes(x = FPR, y = TPR)) +
+  geom_line(color = "blue", linewidth = 1) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray") +
+  labs(
+    title = "ROC Curve",
+    x = "False Positive Rate (1 - Specificity)",
+    y = "True Positive Rate (Sensitivity)"
+  ) +
+  annotate("text", x = 0.8, y = 0.2, label = paste("AUC =", round(auc_value, 2)), 
+           size = 7, color = "red", family = "EB Garamond", fontface = "bold") +
+  theme_hc() +  # Apply the custom theme
+  theme(
+    axis.text = element_text(size = 20, family = "EB Garamond", face = "bold"),
+    axis.title.y = element_text(size = 20, family = "EB Garamond", margin = ggplot2::margin(r = 20, l = 10)),
+    axis.title.x = element_text(size = 20, family = "EB Garamond"),
+    axis.text.x = element_text(color = "black"),
+    axis.text.y = element_text(color = "black"),
+    legend.position = "bottom",
+    plot.title = element_text(family = "EB Garamond", size = 23, face = "bold"),
+    legend.text = element_text(size = 14, face = "bold"),
+    legend.title = element_text(size = 16, face = "bold")
+  )
+
+# Print optimal threshold and AUC for reference
+print(paste("Optimal Threshold:", optimal_threshold))
+print(paste("AUC:", auc_value))
+
+```
+
+
+```{r}
+# test model accuracy on training data which is balanced
+predicted_probs <- predict(glmod_stepwise, type = "response")
+# optimal_threshold <- optimal_threshold$threshold
+predicted_class <- ifelse(predicted_probs > optimal_threshold, "High", "Low") |> factor(levels = c("High", "Low"))
+confusionMatrix(predicted_class, factor(balanced_data$damage, levels = c("High", "Low")))
+```
+
+
+```{r}
+# test model accuracy on test data which is unbalanced
+predicted_probs <- predict(glmod_stepwise, newdata = test_data, type = "response")
+predicted_class <- ifelse(predicted_probs > optimal_threshold, "High", "Low") |> factor(levels = c("High", "Low"))
+confusionMatrix(predicted_class, factor(test_data$damage, levels = c("High", "Low")))
+```
+
+
+```{r fig.width=12, fig.height=9}
+# show the specificity and sensitivity difference graphically
+
+# Create tibble
+sens_spec <- tibble(
+  stage = factor(c("Training", "Testing", "Training", "Testing"), levels = c("Training", "Testing")),
+  metric = c("Sensitivity", "Sensitivity", "Specificity", "Specificity"),
+  pct = c(80.7, 80.3, 59.4,24)
+)
+
+# Plot with percentages on top of bars
+sens_spec %>%
+  ggplot(aes(metric, pct, fill = stage)) +
+  geom_col(position = "dodge", width = 0.5) + 
+  geom_text(
+    aes(label = paste0(pct, "%")),  # Format percentages
+    position = position_dodge(width = 0.5),      # Align text with bars
+    vjust = -0.7, size = 7, family = "EB Garamond", fontface = "bold"                           # Adjust text position above bars
+  ) +
+  scale_fill_manual(name = "", values = c("brown", "steelblue")) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  labs(
+    y = "",
+    x = "",
+    title = "Sensitivity & Specificity for Logistic Regression Model",
+    subtitle = "Model struggles with predicting Low as indicated by reduced Specificity\n"
+  ) +
+  theme_hc() +  # Apply the custom theme
+  theme(
+    axis.text = element_text(size = 25, family = "EB Garamond", face = "bold"),
+    axis.title.y = element_text(size = 20, family = "EB Garamond", margin = ggplot2::margin(r = 20, l = 10)),
+    axis.title.x = element_text(size = 20, family = "EB Garamond"),
+    axis.text.x = element_text(color = "black"),
+    axis.text.y = element_text(color = "black", size = 21),
+    legend.position = "bottom",
+    plot.title = element_text(family = "EB Garamond", size = 23, face = "bold"),
+    plot.subtitle = element_text(family = "EB Garamond", size = 20, margin = ggplot2::margin(t = 5, b = 10)),
+    legend.text = element_text(size = 14, face = "bold"),
+    legend.title = element_text(size = 16, face = "bold")
+  )
+
+```
+
+```{r}
+plot(glmod_stepwise)
+```
+
+
+
+```{r}
+# check for normality of residuals
+
+binned_residuals <- balanced_data |> 
+    mutate(
+      residuals = residuals(glmod_full), 
+      linpred = predict(glmod_full), 
+      predprob = predict(glmod_full, type = "response")
+    ) |> 
+    group_by(cut(linpred, breaks = unique(quantile(linpred, (1:100)/100)))) |> 
+    summarise(
+      residuals = mean(residuals), 
+      linpred = mean(linpred), 
+      ppred = mean(predprob),
+      y = sum(damage == "High"),
+      count = n(),
+      se.fit = sqrt(ppred * (1 - ppred) / count),
+      obs_prob = y / count
+    )
+binned_residuals |> head()
+```
+
+
+```{r fig.width=14, fig.height=8}
+
+
+binned_residuals |> 
+    ggplot(aes(linpred, residuals)) +
+    geom_point(color = "blue4", size = 2) +
+    labs(
+      x = "Linear Predictor",
+      y = "Residuals",
+      title = "Residuals vs Predicted Probabilities (Binned)",
+      subtitle = "The variance of the residuals is not constant, violating the assumption of homoskedasticity in the logistic regression model."
+    ) +
+    theme_hc() +  # Apply the custom theme
+    theme(
+      axis.text = element_text(size = 23, family = "EB Garamond", face = "bold"),
+      axis.title.y = element_text(size = 20, family = "EB Garamond", margin = ggplot2::margin(r = 20, l = 10)),
+      axis.title.x = element_text(size = 20, family = "EB Garamond"),
+      axis.text.x = element_text(color = "black"),
+      axis.text.y = element_text(color = "black"),
+      legend.position = "right",
+      plot.title = element_text(family = "EB Garamond", size = 23, face = "bold"),
+      plot.subtitle = element_text(family = "EB Garamond", size = 17, margin = ggplot2::margin(t = 5, b = 10)),
+      legend.text = element_text(size = 14, face = "bold"),
+      legend.title = element_text(size = 16, face = "bold")
+  )
+```
+
+```{r fig.width=14, fig.height=8}
+# check for model fit
+# 
+binned_residuals |> 
+  ggplot(aes(ppred, obs_prob, ymin = obs_prob - 2*se.fit, ymax = obs_prob + 2*se.fit)) +
+  geom_point(color = "blue", size = 2) +
+  geom_linerange() +
+  geom_abline(slope = 1, intercept = 0, color = "red4", linewidth = 0.7, linetype = "dashed") +
+  labs(
+      y = "Predicted Probability",
+      x = "Observed Proportion",
+      title = "Predicted Probability vs Observed Proportion (Binned)",
+      subtitle = "Although we can see there is some variation, there is no consistent deviation from what is expected."
+    ) +
+    theme_hc() +  # Apply the custom theme
+    theme(
+      axis.text = element_text(size = 20, family = "EB Garamond", face = "bold"),
+      axis.title.y = element_text(size = 20, family = "EB Garamond", margin = ggplot2::margin(r = 20, l = 10)),
+      axis.title.x = element_text(size = 20, family = "EB Garamond"),
+      axis.text.x = element_text(color = "black"),
+      axis.text.y = element_text(color = "black"),
+      legend.position = "right",
+      plot.title = element_text(family = "EB Garamond", size = 23, face = "bold"),
+      plot.subtitle = element_text(family = "EB Garamond", size = 17, margin = ggplot2::margin(t = 5, b = 10)),
+      legend.text = element_text(size = 14, face = "bold"),
+      legend.title = element_text(size = 16, face = "bold")
+  )
+```
+
+
+```{r}
+# check the Hosmer-Lemeshow statistics
+hlstat <- with(binned_residuals, sum( (y - count * ppred)^2 / (count * ppred * (1 - ppred)))) 
+c(hlstat, nrow(binned_residuals))
+```
+
+```{r}
+# check for model fit
+1 - pchisq(850, 100)
+```
+
+Non Linear Models 
+
+
+```{r}
+
+# setting up the data for xgboost model
+train_data <- as.data.frame(lapply(balanced_data, function(x) {
+  if (is.factor(x)) {
+    return(as.numeric(factor(x)))  # Convert factors to numeric levels
+  } else {
+    return(as.numeric(x))  # Leave numeric columns as is
+  }
+}))
+
+# Handle missing values if any
+train_data[is.na(train_data)] <- 0
+train_label <- ifelse(train_data$damage == 1, 0, 1)
+train_matrix <- as.matrix(train_data[, -1])
+
+
+test_data <- as.data.frame(lapply(test_data, function(x) {
+  if (is.factor(x)) {
+    return(as.numeric(factor(x)))  # Convert factors to numeric levels
+  } else {
+    return(as.numeric(x))  # Leave numeric columns as is
+  }
+}))
+
+test_data[is.na(test_data)] <- 0
+test_label <- ifelse(test_data$damage == 1, 0, 1)
+test_matrix <- as.matrix(test_data[, -1])
+```
+
+
+```{r}
+balanced_data$damage[1:10]
+```
+```{r}
+train_data$damage[1:10]
+```
+```{r}
+train_label[1:10]
+```
+
+
+
+```{r include=FALSE}
+# Prepare DMatrix
+dtrain <- xgb.DMatrix(data = train_matrix, label = train_label)
+dtest <- xgb.DMatrix(data = test_matrix, label = test_label)
+# Train the XGBoost model do not run again
+# model <- xgboost(data = dtrain, nrounds = 50, objective = "binary:logistic")
+# xgb.save(model, "xgboost_model.bin")
+model <- xgb.load("xgboost_model.bin")
+```
+
+
+```{r}
+predicted_probs <- predict(model, newdata = dtrain)
+
+# optimal_threshold <- optimal_threshold$threshold
+predicted_class <- ifelse(predicted_probs > optimal_threshold, "High", "Low") |> factor(levels = c("High", "Low"))
+confusionMatrix(predicted_class, factor(balanced_data$damage, levels = c("High", "Low")))
+```
+
+
+
+
+
+```{r}
+# test_data[1:10]
+# test_label[1:10]
+```
+
+
+```{r}
+predicted_probs <- predict(model, newdata = dtest)
+
+# optimal_threshold <- optimal_threshold$threshold
+predicted_class <- ifelse(predicted_probs > optimal_threshold, "High", "Low") |> factor(levels = c("High", "Low"))
+confusionMatrix(predicted_class, factor(ifelse(test_label == 0, "High", "Low"), levels = c("High", "Low")))
+```
+
+
+
+
+```{r}
+# Train Random Forest
+# rf_model <- randomForest(damage ~ ., data = balanced_data, ntree = 5, mtry = 3, importance = TRUE)
+
+# View Model Summary
+# saveRDS(rf_model, "random_forest_model.rds")
+rf_model <- readRDS("random_forest_model.rds")
+print(rf_model)
+```
+
+
+
+```{r}
+# Convert test_data into a matrix or data frame before prediction
+predictions <- predict(rf_model, newdata = balanced_data, type = "response")
+
+conf_matrix <- confusionMatrix(
+  factor(predictions, levels = c("High", "Low")),
+  factor(balanced_data$damage, levels = c("High", "Low"))
+)
+
+# Print the results
+print(conf_matrix)
+```
+
+
+
+
+```{r}
+
+# split the data into training and testing
+set.seed(1984)
+
+
+# Convert test_data into a matrix or data frame before prediction
+predictions <- predict(rf_model, newdata = df[-train_index, ], type = "response")
+
+conf_matrix <- confusionMatrix(
+  factor(predictions, levels = c("High", "Low")),
+  factor(df[-train_index, ]$damage, levels = c("High", "Low"))
+)
+print(conf_matrix)
+```
+
+
+
+```{r}
+
+# Define parameters
+params <- list(
+  objective = "binary",      # Binary classification
+  num_leaves = 31,           # Maximum number of leaves in one tree
+  learning_rate = 0.05,      # Step size for updates
+  boosting = "gbdt",         # Gradient boosting decision trees
+  metric = "binary_logloss"  # Evaluation metric
+)
+
+# Train LightGBM model
+lgb_model <- lightgbm(
+  data = train_matrix,
+  label = train_label,
+  params = params,
+  nrounds = 100,             # Number of boosting iterations
+  verbose = 1                # Verbosity level
+)
+```
+```{r}
+predictions[1:10]
+```
+
+
+```{r}
+# Convert test_data into a matrix or data frame before prediction
+predictions <- predict(lgb_model, newdata = train_matrix, type = "response")
+
+predicted_labels <- factor(ifelse(predictions > optimal_threshold, "High", "Low"), levels = c("High", "Low"))
+
+conf_matrix <- confusionMatrix(predicted_labels, factor(balanced_data$damage, levels = c("High", "Low")))
+
+# Print the results
+print(conf_matrix)
+```
+
+
+
+```{r}
+# Convert test_data into a matrix or data frame before prediction
+predictions <- predict(lgb_model, newdata = test_matrix, type = "response")
+
+predicted_labels <- factor(ifelse(predictions > optimal_threshold, "High", "Low"), levels = c("High", "Low"))
+
+conf_matrix <- confusionMatrix(predicted_labels, factor(ifelse(test_label == 0, "High", "Low"), levels = c("High", "Low")))
+
+# Print the results
+print(conf_matrix)
+```
+
+
+
+
+
+```{r fig.height=8, fig.width=18}
+library(ggplot2)
+library(patchwork)
+
+# Data for comparison
+metrics_data <- list(
+  data.frame(
+    Metric = rep(c("Accuracy", "F1-Score", "Sensitivity", "Specificity"), 2),
+    Dataset = c(rep("Train", 4), rep("Test", 4)),
+    Value = c(0.8735,	0.0954,	0.9901,	0.7119, 0.7173,	0.1257,	0.4602,	0.0715)   # Test values
+  ),
+  data.frame(
+    Metric = rep(c("Accuracy", "F1-Score", "Sensitivity", "Specificity"), 2),
+    Dataset = c(rep("Train", 4), rep("Test", 4)),
+    Value = c(0.8005,	0.1822,	0.9435,	0.3246, 0.7206,	0.1637,	0.4982,	0.0966)   # Test values for LightGBM
+  ),
+  data.frame(
+    Metric = rep(c("Accuracy", "F1-Score", "Sensitivity", "Specificity"), 2),
+    Dataset = c(rep("Train", 4), rep("Test", 4)),
+    Value = c(0.8619,	0.0188,	0.9869,	0.687, 0.7222,	0.0919,	0.5267,	0.0487)   # Test values for XGBoost
+  ),
+  data.frame(
+    Metric = rep(c("Accuracy", "F1-Score", "Sensitivity", "Specificity"), 2),
+    Dataset = c(rep("Train", 4), rep("Test", 4)),
+    Value = c(0.7161,	0.1822,	0.7131,	0.5482, 0.6648,	0.2575,	0.3384,	0.21)   # Test values for Random Forest
+  )
+)
+
+# Create individual plots for each model
+plots <- lapply(metrics_data, function(data) {
+  ggplot(data, aes(x = Metric, y = Value, fill = Dataset)) +
+    geom_bar(stat = "identity", position = position_dodge(width = 0.7), width = 0.6) +
+    geom_text(aes(label = round(Value, 2)), 
+              position = position_dodge(width = 0.7), vjust = -0.5, size = 3.5) +
+    scale_fill_manual(values = c("Train" = "#0073C2FF", "Test" = "#EFC000FF")) +
+    labs(
+      x = "Metric",
+      y = "Value",
+      fill = "Dataset"
+    ) +
+    theme_hc() +
+    theme(
+      text = element_text(size = 12),
+      legend.position = "top"
+    )
+})
+
+# Combine plots into a 2x2 grid
+model_labels <- c("XGBoost", "Random Forest", "Logistic Regression", "LightGBM")
+combined_plot <- (
+  plots[[1]] + 
+    labs(title = model_labels[1]) + 
+    plots[[2]] + 
+    labs(title = model_labels[2]) +
+    plots[[3]] + 
+    labs(title = model_labels[3]) +
+    plots[[4]]) +
+  labs(title = model_labels[4]) + 
+  plot_layout(ncol = 2, nrow = 2)
+
+combined_plot
+
+```
+
+
+
+
+
+```{r}
+library(ggplot2)
+
+# Data for comparison
+metrics_data <- data.frame(
+  Metric = rep(c("Accuracy", "F1-Score", "Sensitivity", "Specificity"), 2),
+  Dataset = c(rep("Train", 4), rep("Test", 4)),
+  Value = c(0.87, 0.73, 0.71, 0.99,   # Train values
+            0.72, 0.10, 0.05, 0.96)   # Test values
+)
+
+# Create the bar plot
+ggplot(metrics_data, aes(x = Metric, y = Value, fill = Dataset)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.7), width = 0.6) +
+  geom_text(aes(label = round(Value, 2)), 
+            position = position_dodge(width = 0.7), vjust = -0.5, size = 3.5) +
+  scale_fill_manual(values = c("Train" = "#0073C2FF", "Test" = "#EFC000FF")) +
+  labs(
+    title = "Metrics Comparison: Train vs. Test Dataset",
+    x = "Metric",
+    y = "Value",
+    fill = "Dataset"
+  ) +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 12),
+    legend.position = "top"
+  )
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

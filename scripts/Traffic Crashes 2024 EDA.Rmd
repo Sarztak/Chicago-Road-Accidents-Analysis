@@ -1,0 +1,987 @@
+---
+title: "Chicago Road Accidents Analysis"
+author: "Sarthak Sunil Dhanke"
+date: "2024-11-27"
+output: html_document
+---
+
+```{r warning=FALSE, message=FALSE}
+
+# setting up directory path and loading libraries
+setwd('/path/to/your/directory/Chicago Road Accidents Analysis')
+library(nnet)
+library(car)
+library(DescTools)
+library(caret)
+library(performance)
+library(randomForest)
+library(ROSE)
+library(tidyverse)
+library(skimr)
+library(showtext)
+library(ggthemes)
+library(patchwork)
+
+# this will be sued to add font on plots
+font_add_google("EB Garamond")
+windows()
+showtext_auto()
+```
+
+```{r warning=FALSE, message=FALSE}
+# loading the data and checking columns
+df_full <- read_csv("./data/traffic_crashes_2024.csv")
+colnames(df_full)
+```
+
+
+
+```{r}
+# selected useful columns and predictor
+selected_vars <- c(
+  "DAMAGE", "POSTED_SPEED_LIMIT", "NUM_UNITS", "MOST_SEVERE_INJURY",
+  "WEATHER_CONDITION", "LIGHTING_CONDITION", "ROADWAY_SURFACE_COND",
+  "TRAFFICWAY_TYPE", "PRIM_CONTRIBUTORY_CAUSE", "SEC_CONTRIBUTORY_CAUSE",
+  "LANE_CNT", "TRAFFIC_CONTROL_DEVICE", "ALIGNMENT", "ROAD_DEFECT", 
+  "CRASH_HOUR", "CRASH_DAY_OF_WEEK", "CRASH_MONTH", "FIRST_CRASH_TYPE"
+)
+df <- df_full |>
+  dplyr::select(all_of(selected_vars))
+```
+
+
+```{r}
+# checking for missing values and basic statistics
+skim(df)
+```
+
+
+```{r}
+# dropping LANE_CNT the column is empty
+columns_to_drop <- c("LANE_CNT")
+threshold <- 30
+df <- df |> select(-all_of(columns_to_drop))
+colnames(df)
+```
+```{r}
+# drop missing values in most severe injury
+df <- df |> 
+    drop_na()
+skim(df)
+```
+
+
+```{r} 
+# checking the distribution of speed limit
+df |> 
+    ggplot(aes(POSTED_SPEED_LIMIT)) +
+    geom_histogram(binwidth = 5, color = "white", fill = "darkcyan")
+```
+
+```{r}
+# the min posted speed limit is 0 and the max is 70
+# I need to figure out how many values are outlier like this. 
+# 0 is absurd so I will remove it as missing value, but I will keep 70
+df |> 
+    filter(POSTED_SPEED_LIMIT == 0) |> 
+    count()
+```
+
+```{r}
+df <- df |> 
+    filter(POSTED_SPEED_LIMIT != 0)
+```
+
+```{r}
+df |> 
+  count(FIRST_CRASH_TYPE, sort = TRUE)
+```
+
+```{r}
+df |> 
+  count(PRIM_CONTRIBUTORY_CAUSE, sort = TRUE)
+```
+
+
+```{r}
+df |> 
+  count(SEC_CONTRIBUTORY_CAUSE, sort = TRUE)
+```
+
+```{r}
+# Convert categorical variables to factors
+df <- df |> 
+  mutate(across(c(WEATHER_CONDITION, TRAFFICWAY_TYPE, LIGHTING_CONDITION,
+                  ROADWAY_SURFACE_COND, ROAD_DEFECT, PRIM_CONTRIBUTORY_CAUSE,
+                  SEC_CONTRIBUTORY_CAUSE, DAMAGE, MOST_SEVERE_INJURY), as.factor))
+```
+
+* Feature Engineering : Reducing the categories....
+
+```{r}
+df <- df |> 
+  mutate(DAMAGE_GROUP = case_when(
+    DAMAGE == "OVER $1,500" ~ "High",
+    DAMAGE == "$501 - $1,500" ~ "Low",
+    DAMAGE == "$500 OR LESS" ~ "Low",
+  ) |> factor(levels = c("High", "Low"))
+)
+```
+
+
+
+```{r}
+df |> count(DAMAGE_GROUP)
+```
+
+
+```{r}
+df |> 
+    count(NUM_UNITS)
+```
+
+
+```{r}
+df <- df %>%
+  mutate(NUM_UNITS_GROUP = case_when(
+    NUM_UNITS == 1 ~ "1 unit",
+    NUM_UNITS == 2 ~ "2 units",
+    NUM_UNITS >= 3 ~ "3+ units",
+    TRUE ~ NA_character_  # Handle any unexpected cases
+  ))
+
+# Convert to factor
+df$NUM_UNITS_GROUP <- factor(df$NUM_UNITS_GROUP)
+
+```
+
+
+```{r}
+df |> 
+    count(WEATHER_CONDITION) |> 
+    arrange(-n)
+```
+
+```{r}
+df <- df %>%
+  mutate(WEATHER_CONDITION_GROUP = case_when(
+    WEATHER_CONDITION == "CLEAR" ~ "Clear",
+    WEATHER_CONDITION %in% c("RAIN", "CLOUDY/OVERCAST", "SNOW") ~ "Rainy/Cloudy",
+    WEATHER_CONDITION %in% c("FREEZING RAIN/DRIZZLE", "FOG/SMOKE/HAZE", "SLEET/HAIL", "BLOWING SNOW", "SEVERE CROSS WIND GATE") ~ "Adverse Weather",
+    WEATHER_CONDITION %in% c("OTHER", "UNKNOWN") ~ "Unknown",
+    TRUE ~ NA_character_
+  ))
+
+# Convert to factor
+df$WEATHER_CONDITION_GROUP <- factor(df$WEATHER_CONDITION_GROUP)
+
+```
+
+
+
+```{r}
+df |> 
+    count(LIGHTING_CONDITION) |> 
+    arrange(-n)
+```
+
+```{r}
+df <- df %>%
+  mutate(LIGHTING_CONDITION_GROUP = case_when(
+    LIGHTING_CONDITION == "DAYLIGHT" ~ "Daylight",
+    LIGHTING_CONDITION %in% c("DARKNESS", "DARKNESS, LIGHTED ROAD") ~ "Darkness-related",
+    LIGHTING_CONDITION %in% c("DAWN", "DUSK") ~ "Twilight",
+    LIGHTING_CONDITION == "UNKNOWN" ~ "Unknown",
+    TRUE ~ NA_character_
+  ))
+
+# Convert to factor
+df$LIGHTING_CONDITION_GROUP <- factor(df$LIGHTING_CONDITION_GROUP)
+```
+
+
+```{r}
+df |> 
+    count(ROAD_DEFECT)
+```
+
+
+```{r}
+df <- df %>%
+  mutate(ROAD_DEFECT_GROUP = case_when(
+    ROAD_DEFECT == "NO DEFECTS" ~ "No Defects",
+    ROAD_DEFECT %in% c("DEBRIS ON ROADWAY", "RUT, HOLES", "SHOULDER DEFECT", "WORN SURFACE") ~ "Road Defects",
+    ROAD_DEFECT %in% c("OTHER", "UNKNOWN") ~ "Unknown",
+    TRUE ~ NA_character_
+  ))
+
+# Convert to factor
+df$ROAD_DEFECT_GROUP <- factor(df$ROAD_DEFECT_GROUP)
+```
+
+
+
+```{r}
+df |> 
+    count(ROADWAY_SURFACE_COND)
+```
+
+
+```{r}
+df <- df %>%
+  mutate(ROADWAY_SURFACE_COND_GROUP = case_when(
+    ROADWAY_SURFACE_COND == "DRY" ~ "Dry",
+    ROADWAY_SURFACE_COND == "WET" ~ "Wet",
+    ROADWAY_SURFACE_COND %in% c("ICE", "SNOW OR SLUSH", "SAND, MUD, DIRT") ~ "Hazardous Conditions",
+    ROADWAY_SURFACE_COND %in% c("OTHER", "UNKNOWN") ~ "Unknown",
+    TRUE ~ NA_character_
+  ))
+
+# Convert to factor
+df$ROADWAY_SURFACE_COND_GROUP <- factor(df$ROADWAY_SURFACE_COND_GROUP)
+
+```
+
+```{r}
+df |> 
+    count(MOST_SEVERE_INJURY)
+```
+
+```{r}
+df <- df %>%
+  mutate(MOST_SEVERE_INJURY_GROUP = case_when(
+    MOST_SEVERE_INJURY == "FATAL" ~ "Fatal",
+    MOST_SEVERE_INJURY == "INCAPACITATING INJURY" ~ "Incapacitating Injury",
+    MOST_SEVERE_INJURY %in% c("NONINCAPACITATING INJURY", "REPORTED, NOT EVIDENT") ~ "Minor Injury",
+    MOST_SEVERE_INJURY == "NO INDICATION OF INJURY" ~ "No Injury",
+    TRUE ~ NA_character_
+  ))
+
+# Convert to factor
+df$MOST_SEVERE_INJURY_GROUP <- factor(df$MOST_SEVERE_INJURY_GROUP, 
+                                              levels = c("Fatal", "Incapacitating Injury", "Minor Injury", "No Injury"))
+
+```
+
+```{r}
+df |> count(MOST_SEVERE_INJURY_GROUP)
+```
+
+
+```{r}
+df |> 
+    count(TRAFFICWAY_TYPE) |>
+    arrange(-n)
+```
+
+
+```{r}
+df <- df %>%
+  mutate(TRAFFICWAY_TYPE_GROUP = case_when(
+    TRAFFICWAY_TYPE %in% c("DIVIDED - W/MEDIAN (NOT RAISED)", "DIVIDED - W/MEDIAN BARRIER") ~ "Divided Roads",
+    TRAFFICWAY_TYPE %in% c("NOT DIVIDED", "FOUR WAY", "ONE-WAY", "T-INTERSECTION", 
+                           "CENTER TURN LANE", "ROUNDABOUT", "Y-INTERSECTION", "L-INTERSECTION") ~ "Non-Divided Roads",
+    TRAFFICWAY_TYPE %in% c("PARKING LOT", "ALLEY", "RAMP", "DRIVEWAY", "TRAFFIC ROUTE") ~ "Special Areas",
+    TRAFFICWAY_TYPE %in% c("OTHER", "UNKNOWN", "UNKNOWN INTERSECTION TYPE", "NOT REPORTED", "FIVE POINT, OR MORE") ~ "Unclassified/Unknown",
+    TRUE ~ NA_character_
+  ))
+
+# Convert to factor
+df$TRAFFICWAY_TYPE_GROUP <- factor(df$TRAFFICWAY_TYPE_GROUP)
+```
+
+```{r}
+df |> 
+    count(ALIGNMENT)
+```
+
+```{r}
+df <- df %>%
+  mutate(ALIGNMENT_GROUP = case_when(
+    ALIGNMENT %in% c("STRAIGHT AND LEVEL", "STRAIGHT ON GRADE", "STRAIGHT ON HILLCREST") ~ "Straight Roads",
+    ALIGNMENT %in% c("CURVE ON GRADE", "CURVE ON HILLCREST", "CURVE, LEVEL") ~ "Curved Roads",
+    TRUE ~ NA_character_
+  ))
+
+# Convert to factor
+df$ALIGNMENT_GROUP <- factor(df$ALIGNMENT_GROUP)
+```
+
+```{r}
+df |> 
+    count(PRIM_CONTRIBUTORY_CAUSE) |> 
+    arrange(-n)
+```
+
+```{r}
+df <- df %>%
+  mutate(PRIM_CAUSE_GROUP = case_when(
+    PRIM_CONTRIBUTORY_CAUSE %in% c("FAILING TO YIELD RIGHT-OF-WAY", "FOLLOWING TOO CLOSELY", "IMPROPER OVERTAKING/PASSING", "HAD BEEN DRINKING (USE WHEN ARREST IS NOT MADE)", "DRIVING ON WRONG SIDE/WRONG WAY",
+                                  "FAILING TO REDUCE SPEED TO AVOID CRASH", "DRIVING SKILLS/KNOWLEDGE/EXPERIENCE", "DISREGARDING YIELD SIGN",
+                                  "IMPROPER TURNING/NO SIGNAL", "IMPROPER LANE USAGE", "IMPROPER BACKING", 
+                                  "DISREGARDING TRAFFIC SIGNALS", "OPERATING VEHICLE IN ERRATIC, RECKLESS, CARELESS, NEGLIGENT OR AGGRESSIVE MANNER", 
+                                  "DISREGARDING STOP SIGN", "DISREGARDING OTHER TRAFFIC SIGNS", "DISREGARDING ROAD MARKINGS", 
+                                  "DISTRACTION - FROM INSIDE VEHICLE", "DISTRACTION - OTHER ELECTRONIC DEVICE (NAVIGATION DEVICE, DVD PLAYER, ETC.)", 
+                                  "TEXTING", "TURNING RIGHT ON RED", "CELL PHONE USE OTHER THAN TEXTING", "PASSING STOPPED SCHOOL BUS", 
+                                  "BICYCLE ADVANCING LEGALLY ON RED LIGHT", "MOTORCYCLE ADVANCING LEGALLY ON RED LIGHT") ~ "Driver Behavior",
+    PRIM_CONTRIBUTORY_CAUSE %in% c("WEATHER", "VISION OBSCURED (SIGNS, TREE LIMBS, BUILDINGS, ETC.)", "PHYSICAL CONDITION OF DRIVER", "RELATED TO BUS STOP",
+                                  "UNDER THE INFLUENCE OF ALCOHOL/DRUGS (USE WHEN ARREST IS EFFECTED)", 
+                                  "DISTRACTION - FROM OUTSIDE VEHICLE", "EQUIPMENT - VEHICLE CONDITION", "ANIMAL", 
+                                  "EVASIVE ACTION DUE TO ANIMAL, OBJECT, NONMOTORIST") ~ "External Factors",
+    PRIM_CONTRIBUTORY_CAUSE %in% c("ROAD ENGINEERING/SURFACE/MARKING DEFECTS", "ROAD CONSTRUCTION/MAINTENANCE", "OBSTRUCTED CROSSWALKS") ~ "Road Conditions/Defects",
+    PRIM_CONTRIBUTORY_CAUSE %in% c("UNABLE TO DETERMINE", "NOT APPLICABLE") ~ "Unknown/Other",
+    TRUE ~ NA_character_
+  ))
+
+# Convert to factor
+df$PRIM_CAUSE_GROUP <- factor(df$PRIM_CAUSE_GROUP)
+
+```
+
+
+
+```{r}
+df |> 
+    count(SEC_CONTRIBUTORY_CAUSE) |> 
+    arrange(-n)
+```
+
+```{r}
+df <- df %>%
+  mutate(SEC_CAUSE_GROUP = case_when(
+    SEC_CONTRIBUTORY_CAUSE %in% c("FAILING TO YIELD RIGHT-OF-WAY", "FOLLOWING TOO CLOSELY", "IMPROPER OVERTAKING/PASSING", "DRIVING SKILLS/KNOWLEDGE/EXPERIENCE", "FAILING TO REDUCE SPEED TO AVOID CRASH",
+"DISREGARDING ROAD MARKINGS", "IMPROPER TURNING/NO SIGNAL", "IMPROPER LANE USAGE", "IMPROPER BACKING", 
+                                 "DISREGARDING TRAFFIC SIGNALS", "OPERATING VEHICLE IN ERRATIC, RECKLESS, CARELESS, NEGLIGENT OR AGGRESSIVE MANNER", "DRIVING ON WRONG SIDE/WRONG WAY", "PASSING STOPPED SCHOOL BUS",
+                                 "DISREGARDING STOP SIGN", "DISTRACTION - FROM INSIDE VEHICLE", "DISREGARDING OTHER TRAFFIC SIGNS", 
+                                 "DISTRACTION - OTHER ELECTRONIC DEVICE (NAVIGATION DEVICE, DVD PLAYER, ETC.)", "CELL PHONE USE OTHER THAN TEXTING", 
+                                 "TURNING RIGHT ON RED", "TEXTING", "DISREGARDING YIELD SIGN", "BICYCLE ADVANCING LEGALLY ON RED LIGHT", 
+                                 "MOTORCYCLE ADVANCING LEGALLY ON RED LIGHT") ~ "Driver Behavior",
+    SEC_CONTRIBUTORY_CAUSE %in% c("WEATHER", "VISION OBSCURED (SIGNS, TREE LIMBS, BUILDINGS, ETC.)", "PHYSICAL CONDITION OF DRIVER", 
+                                 "UNDER THE INFLUENCE OF ALCOHOL/DRUGS (USE WHEN ARREST IS EFFECTED)", "DISTRACTION - FROM OUTSIDE VEHICLE", "EQUIPMENT - VEHICLE CONDITION", "EVASIVE ACTION DUE TO ANIMAL, OBJECT, NONMOTORIST", "ANIMAL") ~ "External Factors",
+    SEC_CONTRIBUTORY_CAUSE %in% c("ROAD ENGINEERING/SURFACE/MARKING DEFECTS", "ROAD CONSTRUCTION/MAINTENANCE", "OBSTRUCTED CROSSWALKS") ~ "Road Conditions/Defects",
+    SEC_CONTRIBUTORY_CAUSE %in% c("NOT APPLICABLE", "UNABLE TO DETERMINE", "RELATED TO BUS STOP", "HAD BEEN DRINKING (USE WHEN ARREST IS NOT MADE)") ~ "Unknown/Other",
+    TRUE ~ NA_character_
+  ))
+
+# Convert to factor
+df$SEC_CAUSE_GROUP <- factor(df$SEC_CAUSE_GROUP)
+```
+
+
+
+```{r}
+df |> 
+    count(TRAFFIC_CONTROL_DEVICE)
+```
+
+```{r}
+
+df <- df %>%
+  mutate(TRAFFIC_CONTROL_DEVICE_GROUP = case_when(
+    TRAFFIC_CONTROL_DEVICE %in% c("NO CONTROLS", "UNKNOWN") ~ "No Control",
+    TRAFFIC_CONTROL_DEVICE %in% c("BICYCLE CROSSING SIGN", "NO PASSING", "PEDESTRIAN CROSSING SIGN", 
+                                  "OTHER REG. SIGN", "OTHER WARNING SIGN", "STOP SIGN/FLASHER", "SCHOOL ZONE",
+                                  "RR CROSSING SIGN", "TRAFFIC SIGNAL") ~ "Signage",
+    TRAFFIC_CONTROL_DEVICE %in% c("POLICE/FLAGMAN", "FLASHING CONTROL SIGNAL", "RAILROAD CROSSING GATE", "TRAFFIC SIGNAL") ~ "Active Control",
+    TRUE ~ NA_character_
+  ))
+df$TRAFFIC_CONTROL_DEVICE_GROUP <- factor(df$TRAFFIC_CONTROL_DEVICE_GROUP)
+```
+
+
+```{r}
+# Group FIRST_CRASH_TYPE into categories
+df <- df %>%
+  mutate(FIRST_CRASH_TYPE_GROUP = case_when(
+    FIRST_CRASH_TYPE %in% c("PARKED MOTOR VEHICLE", "SIDESWIPE SAME DIRECTION", "SIDESWIPE OPPOSITE DIRECTION", "TURNING") ~ "Low Severity",
+    FIRST_CRASH_TYPE %in% c("REAR END", "ANGLE", "FIXED OBJECT", "REAR TO FRONT", "REAR TO SIDE", "OTHER OBJECT", "OTHER NONCOLLISION") ~ "Moderate Severity",
+    FIRST_CRASH_TYPE %in% c("PEDESTRIAN", "PEDALCYCLIST", "HEAD ON", "OVERTURNED", "TRAIN") ~ "High Severity",
+    FIRST_CRASH_TYPE %in% c("ANIMAL", "REAR TO REAR") ~ "Rare Events",
+    TRUE ~ "Unknown"
+  ))
+
+# Convert to factor
+df$FIRST_CRASH_TYPE_GROUP <- factor(df$FIRST_CRASH_TYPE_GROUP)
+
+```
+
+
+
+
+```{r}
+# change the names of the columns for better readability
+df_grouped <- df %>%
+  rename_with(~ tolower(.))
+df_grouped |> colnames()
+```
+
+
+```{r}
+
+# Clean column names: convert to lowercase and replace spaces with underscores
+
+
+# Select predictors and the target variable (include POSTED_SPEED_LIMIT for now)
+# Select and rename columns while creating a new df (df_grouped)
+df_grouped <- df_grouped %>%
+  dplyr::select(
+    damage = damage_group,
+    posted_speed_limit,
+    num_units = num_units_group,
+    most_severe_injury = most_severe_injury_group,
+    weather_condition = weather_condition_group,
+    lighting_condition = lighting_condition_group,
+    roadway_surface_cond = roadway_surface_cond_group,
+    road_defect = road_defect_group,
+    trafficway_type = trafficway_type_group,
+    prim_cause = prim_cause_group,
+    sec_cause = sec_cause_group,
+    crash_type = first_crash_type_group,
+    crash_hour,
+    crash_day_of_week,
+    crash_month
+  )
+
+df_grouped |> skim()
+```
+
+
+```{r}
+saveRDS(df_grouped, "./data/Traffic Crashes 2024 Grouped.rds")
+```
+
+
+
+* Plotting Distribution for presentation
+
+
+```{r fig.width=14, fig.height=6}
+plot_damage <- df |> 
+  count(DAMAGE) |> 
+  ggplot(aes(DAMAGE, n, fill = n/3)) + 
+  geom_col(width = 0.5, show.legend = F) +
+  scale_fill_gradient(low = "#D2B48C", high = "red4") +
+  scale_y_continuous(labels = scales::label_number(scale = 1e-3, suffix = "K")) +
+  labs(
+      x = "Damage Valuation", 
+      y = "Accident Frequency",
+      title = "Accident Frequency by Damage Valuation",
+      subtitle = "The plot reveals a severe class imbalance, with most accidents falling under lower\ndamage categories, potentially skewing model predictions."
+  ) +
+  theme(
+      axis.text = element_text(size = 18, family = "EB Garamond", face = "bold"),
+      axis.title.y = element_text(size = 20, family = "EB Garamond", margin = ggplot2::margin(r = 20, l = 10)),
+      axis.title.x = element_text(size = 20, family = "EB Garamond", margin = ggplot2::margin(t = 20, b = 10)),
+      axis.text.x = element_text(color = "black"),
+      axis.text.y = element_text(color = "black"),
+      legend.position = "none",
+      plot.title = element_text(family = "EB Garamond", size = 23, face = "bold"), 
+      plot.subtitle = element_text(family = "EB Garamond", size = 17),
+       # plot.margin = ggplot2::margin(1, 1, 1, 1, "cm"),
+    ) +
+  theme_hc()
+
+
+plot_damage_grouped <- df_grouped |> 
+  count(damage) |> 
+  ggplot(aes(damage, n, fill = n)) + 
+  geom_col(width = 0.5, show.legend = F) +
+  scale_fill_gradient(low = "#D2B48C", high = "red4") +
+  scale_y_continuous(labels = scales::label_number(scale = 1e-3, suffix = "K")) +
+  labs(
+      x = "Damage Valuation (Grouped)", 
+      y = "Accident Frequency",
+      title = "Accident Frequency by Damage Valuation (Grouped)",
+      subtitle = "To address the severe class imbalance\n($500 OR LESS) & ($501-$1500) were GROUPED as LOW"
+  ) +
+  theme(
+      axis.text = element_text(size = 18, family = "EB Garamond", face = "bold"),
+      axis.title.y = element_text(size = 20, family = "EB Garamond", margin = ggplot2::margin(r = 20, l = 2)),
+      axis.title.x = element_text(size = 20, family = "EB Garamond", margin = ggplot2::margin(t = 20, b = 2)),
+      axis.text.x = element_text(color = "black"),
+      axis.text.y = element_text(color = "black"),
+      legend.position = "none",
+      plot.title = element_text(family = "EB Garamond", size = 23, face = "bold"), 
+      plot.subtitle = element_text(family = "EB Garamond", size = 17),
+       # plot.margin = ggplot2::margin(0.8, 0.8, 0.8, 0.8, "cm"),
+    ) +
+  theme_hc()
+
+plot_damage + plot_damage_grouped
+```
+
+
+
+```{r fig.width=12, fig.height=6}
+library(dplyr)
+library(ggplot2)
+library(viridis)
+
+# Convert weekday numbers to names
+df |> 
+  mutate(
+    CRASH_DAY_OF_WEEK = factor(
+      CRASH_DAY_OF_WEEK, 
+      levels = 1:7, 
+      labels = c("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
+    ),
+    # Convert hour numbers to formatted time
+    CRASH_HOUR = factor(
+      CRASH_HOUR, 
+      levels = 0:23, 
+      labels = paste0(
+        c(12, 1:11, 12, 1:11), 
+        c(" AM", rep(" AM", 11), " PM", rep(" PM", 11))
+      )
+    )
+  ) |> 
+  count(CRASH_DAY_OF_WEEK, CRASH_HOUR) |> 
+  ggplot(aes(CRASH_HOUR, CRASH_DAY_OF_WEEK, fill = n)) +
+  geom_raster() +
+  scale_fill_viridis_c(option = "magma", direction = -1, name = "Accidents") +
+  labs(
+    x = "Crash Hour",
+    y = "Day of Week",
+    title = "Heatmap of Accidents by Hour and Day",
+    subtitle = "Accidents peak during rush hours (7-9 AM and 4-6 PM) and on weekends"
+  ) +
+  theme_hc() +
+  theme(
+    axis.text = element_text(size = 20, family = "EB Garamond", face = "bold"),
+    axis.title.y = element_text(size = 22, family = "EB Garamond", margin = ggplot2::margin(r = 20, l = 10)),
+    axis.title.x = element_text(size = 22, family = "EB Garamond", margin = ggplot2::margin(t = 20, b = 10)),
+    axis.text.x = element_text(color = "black", angle = 45, hjust = 1),
+    axis.text.y = element_text(color = "black"),
+    axis.ticks.length.y = unit(0, "pt"),
+    axis.ticks.y = element_line(color = NA),
+    legend.position = "right",
+    plot.title = element_text(family = "EB Garamond", size = 23, face = "bold"), 
+    plot.subtitle = element_text(family = "EB Garamond", size = 20),
+    legend.text = element_text(size = 14, face = "bold"),
+    legend.title = element_text(size = 16, face = "bold")
+  ) 
+
+```
+
+
+
+```{r}
+df_grouped_percent <- df_grouped |>
+  select(weather_condition, damage) |>
+  group_by(weather_condition, damage) |>
+  count()
+
+# Reorder the weather_condition factor by the total count of accidents
+df_grouped_percent$weather_condition <- 
+  factor(df_grouped_percent$weather_condition, 
+         levels = df_grouped_percent %>%
+           group_by(weather_condition) %>%
+           summarise(total_count = sum(n)) %>%
+           arrange(total_count) %>%
+           pull(weather_condition))
+
+custom_labels <- c(
+  "Adverse\nWeather",
+  "Unknown",
+  "Rainy/\nCloudy",
+  "Clear"
+)
+
+
+# Plot with reordered weather conditions
+plot_weather_cond <- ggplot(df_grouped_percent, aes(x = weather_condition, y = n, fill = damage)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +  # Flip the bars horizontally
+  scale_y_continuous(labels = scales::label_number(scale = 1e-3, suffix = "K"), breaks = seq(0, 70, 10)*1e3) +
+  scale_fill_manual(name = "Damage", values = c("grey70", "steelblue")) +
+  scale_x_discrete(labels = custom_labels) +
+  labs(
+    y = "Accident Count",
+    x = "Weather Condition",
+    title = "Accident Severity by Weather Condition",
+    subtitle = "Accident counts are unexpectedly higher in clear weather compared to adverse conditions."
+  ) +
+  theme_hc() +  # Apply the custom theme
+  theme(
+    axis.text = element_text(size = 13, family = "EB Garamond", face = "bold"),
+    axis.title.y = element_text(size = 20, family = "EB Garamond", margin = ggplot2::margin(r = 10, l = 10)),
+    axis.title.x = element_text(size = 20, family = "EB Garamond", margin = ggplot2::margin(t = 20, b = 10)),
+    axis.text.x = element_text(color = "black"),
+    axis.text.y = element_text(color = "black", size = 15),
+    legend.position =  c(0.9, 0.3),
+    plot.title = element_text(family = "EB Garamond", size = 23, face = "bold"),
+    plot.subtitle = element_text(family = "EB Garamond", size = 17),
+    legend.text = element_text(size = 14, face = "bold"),
+    legend.title = element_text(size = 16, face = "bold")
+  )
+
+```
+
+
+
+```{r}
+df_grouped_percent <- df_grouped |>
+  select(lighting_condition, damage) |>
+  group_by(lighting_condition, damage) |>
+  count()
+
+# Reorder the weather_condition factor by the total count of accidents
+df_grouped_percent$lighting_condition <- str_wrap(df_grouped_percent$lighting_condition, width = 10)
+df_grouped_percent$lighting_condition <- 
+  factor(df_grouped_percent$lighting_condition, 
+         levels = df_grouped_percent %>%
+           group_by(lighting_condition) %>%
+           summarise(total_count = sum(n)) %>%
+           arrange(total_count) %>%
+           pull(lighting_condition))
+
+custom_labels <- c(
+  "Twilight", "Unknown", "Darkness", "Daylight"
+)
+
+# Plot with reordered weather conditions
+plot_lighting_cond <- ggplot(df_grouped_percent, aes(x = lighting_condition, y = n, fill = damage)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +  # Flip the bars horizontally
+  scale_y_continuous(labels = scales::label_number(scale = 1e-3, suffix = "K"), breaks = seq(0, 70, 10)*1e3) +
+  scale_fill_manual(name = "Damage", values = c("grey70", "steelblue")) +
+  scale_x_discrete(labels = custom_labels) +
+  labs(
+    y = "Accident Count",
+    x = "Lighting Condition",
+    title = "Accident Severity by Lighting Condition",
+    subtitle = "Accident counts are unexpectedly higher in both the Daylight and Dark."
+  ) +
+  theme_hc() +  # Apply the custom theme
+  theme(
+    axis.text = element_text(size = 13, family = "EB Garamond", face = "bold"),
+    axis.title.y = element_text(size = 20, family = "EB Garamond", margin = ggplot2::margin(r = 10, l = 10)),
+    axis.title.x = element_text(size = 20, family = "EB Garamond", margin = ggplot2::margin(t = 20, b = 10)),
+    axis.text.x = element_text(color = "black"),
+    axis.text.y = element_text(color = "black", size = 15),
+    legend.position =  c(0.9, 0.3),
+    plot.title = element_text(family = "EB Garamond", size = 23, face = "bold"),
+    plot.subtitle = element_text(family = "EB Garamond", size = 17),
+    legend.text = element_text(size = 14, face = "bold"),
+    legend.title = element_text(size = 16, face = "bold")
+  )
+```
+
+```{r fig.width=20, fig.height=6}
+plot_weather_cond + plot_lighting_cond
+```
+
+
+```{r fig.width=20, fig.height=6}
+df_grouped |>
+  filter(posted_speed_limit < 50 & posted_speed_limit > 5) |> 
+  ggplot(aes(posted_speed_limit, fill = damage)) +
+  geom_histogram(binwidth = 5, color = "white") +
+  facet_wrap(~damage) +
+  scale_y_continuous(labels = scales::label_number(scale = 1e-3, suffix = "K"), breaks = seq(0, 70, 10)*1e3) +
+  scale_fill_manual(name = "Damage", values = c("steelblue", "red4")) +
+  labs(
+    y = "Accident Count",
+    x = "Posted Speed (MPH)",
+    title = "Distribution of Posted Speed Limit By Damage",
+    subtitle = "The distribution are almost identical & given the severe imbalance posted speed has low predictive power"
+  ) +
+  theme_hc() +
+  theme(
+    axis.text = element_text(size = 20, family = "EB Garamond", face = "bold"),
+    axis.title.y = element_text(size = 20, family = "EB Garamond", margin = ggplot2::margin(r = 20, l = 10)),
+    axis.title.x = element_text(size = 20, family = "EB Garamond", margin = ggplot2::margin(t = 20, b = 10)),
+    axis.text.x = element_text(color = "black"),
+    axis.text.y = element_text(color = "black"),
+    axis.ticks.length.y = unit(0, "pt"),
+    axis.ticks.y = element_line(color = NA),
+    legend.position = "none",
+    plot.title = element_text(family = "EB Garamond", size = 23, face = "bold"), 
+    plot.subtitle = element_text(family = "EB Garamond", size = 20),
+    legend.text = element_text(size = 12),
+    strip.text = element_text(family = "EB Garamond", size = 18, face = "bold")
+  )
+
+```
+
+```{r fig.width=20, fig.height=6}
+
+df_grouped_percent <- df |>
+  count(ROADWAY_SURFACE_COND, DAMAGE) 
+
+
+# Reorder the weather_condition factor by the total count of accidents
+df_grouped_percent$ROADWAY_SURFACE_COND <- 
+  factor(df_grouped_percent$ROADWAY_SURFACE_COND, 
+         levels = df_grouped_percent %>%
+           group_by(ROADWAY_SURFACE_COND) %>%
+           summarise(total_count = sum(n)) %>%
+           arrange(total_count) %>%
+           pull(ROADWAY_SURFACE_COND))
+
+custom_labels <- factor(df_grouped_percent$ROADWAY_SURFACE_COND, 
+         levels = df_grouped_percent %>%
+           group_by(ROADWAY_SURFACE_COND) %>%
+           summarise(total_count = sum(n)) %>%
+           arrange(total_count) %>%
+           pull(ROADWAY_SURFACE_COND)) |> 
+  levels() |> 
+  str_wrap(width = 8) |>
+  str_to_title()
+
+# Plot with reordered weather conditions
+plot_road_cond_ungrouped <- ggplot(df_grouped_percent, aes(x = ROADWAY_SURFACE_COND, y = n, fill = factor(DAMAGE))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +  # Flip the bars horizontally
+  scale_y_continuous(labels = scales::label_number(scale = 1e-3, suffix = "K"), breaks = seq(0, 70, 10)*1e3) +
+  scale_fill_manual(name = "Damage", values = c("#D2B48C", "#AE5A46", "red4")) +
+  scale_x_discrete(labels = custom_labels) +
+  labs(
+    y = "Accident Count",
+    x = "Road Condition",
+    title = "Accident Severity by Road Condition(Before Grouping)",
+    subtitle = "Severe Imbalance between class skews prediction"
+  ) +
+  theme_hc() +  # Apply the custom theme
+  theme(
+    axis.text = element_text(size = 18, family = "EB Garamond", face = "bold"),
+    axis.title.y = element_text(size = 25, family = "EB Garamond", margin = ggplot2::margin(r = 10, l = 10)),
+    axis.title.x = element_text(size = 25, family = "EB Garamond", margin = ggplot2::margin(t = 20, b = 10)),
+    axis.text.x = element_text(color = "black"),
+    axis.text.y = element_text(color = "black"),
+    legend.position =  c(0.8, 0.3),
+    plot.title = element_text(family = "EB Garamond", size = 25, face = "bold"),
+    plot.subtitle = element_text(family = "EB Garamond", size = 22),
+    legend.text = element_text(size = 18),
+    legend.title = element_text(size = 20, face = "bold")
+  )
+
+
+
+df_grouped_percent <- df_grouped |>
+  select(roadway_surface_cond, damage) |>
+  group_by(roadway_surface_cond, damage) |>
+  count()
+
+# Reorder the weather_condition factor by the total count of accidents
+df_grouped_percent$roadway_surface_cond <- 
+  factor(df_grouped_percent$roadway_surface_cond, 
+         levels = df_grouped_percent %>%
+           group_by(roadway_surface_cond) %>%
+           summarise(total_count = sum(n)) %>%
+           arrange(total_count) %>%
+           pull(roadway_surface_cond))
+
+custom_labels <- c(
+  "Hazardous\nCondition",
+  "Wet",
+  "Unknown",
+  "Dry"
+)
+
+# Plot with reordered weather conditions
+plot_road_condition <- ggplot(df_grouped_percent, aes(x = roadway_surface_cond, y = n, fill = damage)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +  # Flip the bars horizontally
+  scale_y_continuous(labels = scales::label_number(scale = 1e-3, suffix = "K"), breaks = seq(0, 70, 10)*1e3) +
+  scale_fill_manual(name = "Damage", values = c("grey70", "steelblue")) +
+  scale_x_discrete(labels = custom_labels) +
+  labs(
+    y = "Accident Count",
+    x = "",
+    title = "Accident Severity by Road Condition(After Grouping)",
+    subtitle = "Contrary to expectation accident count are lower in Wet & Hazardous Conditions"
+  ) +
+  theme_hc() +  # Apply the custom theme
+  theme(
+    axis.text = element_text(size = 18, family = "EB Garamond", face = "bold"),
+    axis.title.y = element_text(size = 25, family = "EB Garamond", margin = ggplot2::margin(r = 10, l = 10)),
+    axis.title.x = element_text(size = 25, family = "EB Garamond", margin = ggplot2::margin(t = 20, b = 10)),
+    axis.text.x = element_text(color = "black"),
+    axis.text.y = element_text(color = "black"),
+    legend.position =  c(0.8, 0.3),
+    plot.title = element_text(family = "EB Garamond", size = 25, face = "bold"),
+    plot.subtitle = element_text(family = "EB Garamond", size = 22),
+    legend.text = element_text(size = 18),
+    legend.title = element_text(size = 20, face = "bold")
+  )
+plot_road_cond_ungrouped + plot_road_condition
+```
+
+
+
+```{r}
+df_grouped_percent <- df_grouped |>
+  select(road_defect, damage) |>
+  group_by(road_defect, damage) |>
+  count()
+
+# Reorder the weather_condition factor by the total count of accidents
+df_grouped_percent$road_defect <- 
+  factor(df_grouped_percent$road_defect, 
+         levels = df_grouped_percent %>%
+           group_by(road_defect) %>%
+           summarise(total_count = sum(n)) %>%
+           arrange(total_count) %>%
+           pull(road_defect))
+
+custom_labels <- c(
+  "Road\nDefect",
+  "Unknown",
+  "No\nDefect"
+)
+
+# Plot with reordered weather conditions
+plot_road_defects <- ggplot(df_grouped_percent, aes(x = road_defect, y = n, fill = damage)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +  # Flip the bars horizontally
+  scale_y_continuous(labels = scales::label_number(scale = 1e-3, suffix = "K"), breaks = seq(0, 70, 10)*1e3) +
+  scale_fill_manual(name = "Damage", values = c("grey70", "steelblue")) +
+  scale_x_discrete(labels = custom_labels) +
+  labs(
+    y = "Accident Count",
+    x = "Road Defects",
+    title = "Accident Severity by Road Defects",
+    subtitle = "Accident counts are unexpectedly high on undamaged roads."
+  ) +
+  theme_hc() +  # Apply the custom theme
+  theme(
+    axis.text = element_text(size = 13, family = "EB Garamond", face = "bold"),
+    axis.title.y = element_text(size = 20, family = "EB Garamond", margin = ggplot2::margin(r = 10, l = 10)),
+    axis.title.x = element_text(size = 20, family = "EB Garamond", margin = ggplot2::margin(t = 20, b = 10)),
+    axis.text.x = element_text(color = "black"),
+    axis.text.y = element_text(color = "black", size = 15),
+    legend.position =  c(0.9, 0.3),
+    plot.title = element_text(family = "EB Garamond", size = 23, face = "bold"),
+    plot.subtitle = element_text(family = "EB Garamond", size = 17),
+    legend.text = element_text(size = 14, face = "bold"),
+    legend.title = element_text(size = 16, face = "bold")
+  )
+
+```
+
+
+```{r fig.width=20, fig.height=6}
+options(repr.plot.width = 25, repr.plot.height = 20)
+plot_road_condition + plot_road_defects
+
+```
+
+
+
+```{r fig.width=20, fig.height=8}
+df_grouped_percent <- df |>
+  count(WEATHER_CONDITION, DAMAGE) 
+
+
+# Reorder the weather_condition factor by the total count of accidents
+df_grouped_percent$WEATHER_CONDITION <- 
+  factor(df_grouped_percent$WEATHER_CONDITION, 
+         levels = df_grouped_percent %>%
+           group_by(WEATHER_CONDITION) %>%
+           summarise(total_count = sum(n)) %>%
+           arrange(total_count) %>%
+           pull(WEATHER_CONDITION))
+
+custom_labels <- factor(df_grouped_percent$WEATHER_CONDITION, 
+         levels = df_grouped_percent %>%
+           group_by(WEATHER_CONDITION) %>%
+           summarise(total_count = sum(n)) %>%
+           arrange(total_count) %>%
+           pull(WEATHER_CONDITION)) |> 
+  levels() |> 
+  str_wrap(width = 8) |>
+  str_to_title()
+
+# Plot with reordered weather conditions
+plot_weather_cond_ungrouped <- ggplot(df_grouped_percent, aes(x = WEATHER_CONDITION, y = n, fill = factor(DAMAGE))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +  # Flip the bars horizontally
+  scale_y_continuous(labels = scales::label_number(scale = 1e-3, suffix = "K"), breaks = seq(0, 70, 10)*1e3) +
+  scale_fill_manual(name = "Damage", values = c("#D2B48C", "#AE5A46", "red4")) +
+  scale_x_discrete(labels = custom_labels) +
+  labs(
+    y = "Accident Count",
+    x = "Weather Condition",
+    title = "Accident Severity by Weather Condition(Before Grouping)",
+    subtitle = "Severe Imbalance between class skews prediction"
+  ) +
+  theme_hc() +  # Apply the custom theme
+  theme(
+    axis.text = element_text(size = 18, family = "EB Garamond", face = "bold"),
+    axis.title.y = element_text(size = 25, family = "EB Garamond", margin = ggplot2::margin(r = 10, l = 10)),
+    axis.title.x = element_text(size = 25, family = "EB Garamond", margin = ggplot2::margin(t = 20, b = 10)),
+    axis.text.x = element_text(color = "black"),
+    axis.text.y = element_text(color = "black"),
+    legend.position =  c(0.8, 0.3),
+    plot.title = element_text(family = "EB Garamond", size = 25, face = "bold"),
+    plot.subtitle = element_text(family = "EB Garamond", size = 22),
+    legend.text = element_text(size = 18),
+    legend.title = element_text(size = 20, face = "bold")
+  )
+
+
+df_grouped_percent <- df_grouped |>
+  select(weather_condition, damage) |>
+  group_by(weather_condition, damage) |>
+  count()
+
+# Reorder the weather_condition factor by the total count of accidents
+df_grouped_percent$weather_condition <- 
+  factor(df_grouped_percent$weather_condition, 
+         levels = df_grouped_percent %>%
+           group_by(weather_condition) %>%
+           summarise(total_count = sum(n)) %>%
+           arrange(total_count) %>%
+           pull(weather_condition))
+
+custom_labels <- c(
+  "Adverse\nWeather",
+  "Unknown",
+  "Rainy/\nCloudy",
+  "Clear"
+)
+
+
+# Plot with reordered weather conditions
+plot_weather_cond <- ggplot(df_grouped_percent, aes(x = weather_condition, y = n, fill = damage)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  coord_flip() +  # Flip the bars horizontally
+  scale_y_continuous(labels = scales::label_number(scale = 1e-3, suffix = "K"), breaks = seq(0, 70, 10)*1e3) +
+  scale_fill_manual(name = "Damage", values = c("grey70", "steelblue")) +
+  scale_x_discrete(labels = custom_labels) +
+  labs(
+    y = "Accident Count",
+    x = "",
+    title = "Accident Severity by Weather Condition(After Grouping)",
+    subtitle = "Accident counts are unexpectedly higher in clear weather compared to adverse conditions."
+  ) +
+  theme_hc() +  # Apply the custom theme
+  theme(
+    axis.text = element_text(size = 18,family = "EB Garamond", face = "bold"),
+    axis.title.y = element_text(size = 25, family = "EB Garamond", margin = ggplot2::margin(r = 10, l = 10)),
+    axis.title.x = element_text(size = 25, family = "EB Garamond", margin = ggplot2::margin(t = 20, b = 10)),
+    axis.text.x = element_text(color = "black"),
+    axis.text.y = element_text(color = "black", size = 22),
+    legend.position =  c(0.8, 0.3),
+    plot.title = element_text(family = "EB Garamond", size = 25, face = "bold"),
+    plot.subtitle = element_text(family = "EB Garamond", size = 22),
+    legend.text = element_text(size = 18),
+    legend.title = element_text(size = 20, face = "bold")
+  )
+
+
+plot_weather_cond_ungrouped + plot_weather_cond
+```
+
+
+
+```{r}
+# Generate a color palette function
+color_palette <- colorRampPalette(c("#D2B48C", "red4"))
+
+# Get a single intermediate color (e.g., the midpoint)
+intermediate_color <- color_palette(3)[2]  # 3 colors; take the middle one
+intermediate_color
+
+```
