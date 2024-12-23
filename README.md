@@ -79,17 +79,17 @@ This project focuses on predicting the severity of traffic accidents based on hi
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/your-username/traffic-accident-prediction.git
+   git clone https://github.com/Sarztak/traffic-accident-prediction.git
    ```
 2. Install necessary dependencies:
    - R: Install required libraries using `install.packages()`.
 3. Run the preprocessing script:
    ```bash
-   Rscript scripts/preprocess.R
+   Rscript notebooks/Traffic Crashes 2024 EDA.Rmd
    ```
 4. Train and evaluate the model:
    ```bash
-   Rscript scripts/train_model.R
+   Rscript notebooks/Traffic Crashes Modelling.Rmd
    ```
 
 ---
